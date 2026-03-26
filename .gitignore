@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+
+# Runtime state
+__pycache__/
+*.pyc
+.watchlist-sync-state.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
