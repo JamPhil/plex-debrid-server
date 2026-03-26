@@ -2,6 +2,7 @@
 .env
 *.pem
 *.key
+IMPORTANT INFO.md
 
 # Logs
 logs/
@@ -19,3 +20,9 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Claude Code
+.claude/
+
+# Draft plans
+plex-debrid-server-plan*.md

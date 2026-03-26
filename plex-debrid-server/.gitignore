@@ -1,0 +1,18 @@
+# Environment variables (contains secrets)
+.env
+
+# Plex config data
+plex-config/
+
+# Database data
+postgres-data/
+
+# Riven data
+riven-data/
+
+# Backup archives
+backups/
+
+# OS files
+.DS_Store
+Thumbs.db
