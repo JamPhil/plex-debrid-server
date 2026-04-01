@@ -1,82 +1,98 @@
 # Architecture
 
-## Data Flow
+## Media Request Flow
 
 ```
-Plex Watchlist (RSS)
+User -> Seerr (web UI) / Doplarr (Discord bot) / Plex Watchlist
        |
        v
-watchlist-sync.py (polls every 60s)
+Seerr (routes request to appropriate *arr app)
+       |  (User needs AUTO_REQUEST permissions for Plex Watchlist sync)
+       v
+Sonarr (TV) / Radarr (Movies)
+       |  Searches via Prowlarr for matching torrents
+       v
+Prowlarr (The Pirate Bay + YTS indexers)
+       |  NOTE: Torrentio, 1337x, EZTV are CloudFlare-blocked from datacenter IPs
+       |  Returns results ranked by quality profile
+       v
+Sonarr/Radarr sends .magnet to Blackhole download client
        |
        v
-Torrentio API (via IPRoyal HTTP proxy)
-       |  Returns torrent streams ranked by quality
+Blackhole script (westsurname/scripts)
+       |  1. Checks if torrent is cached on Real-Debrid
+       |  2. If cached: adds to RD, waits for mount, creates symlinks
+       |  3. If not cached: fails the download (BLACKHOLE_FAIL_IF_NOT_CACHED=true)
+       |  CRITICAL: REALDEBRID_HOST must be https://api.real-debrid.com/rest/1.0/
+       |            (trailing slash required, /rest/1.0/ path required)
        v
-watchlist-sync.py (scores, picks best, validates title)
+Real-Debrid (cloud torrent cache)
        |
        v
-Real-Debrid API (adds magnet, selects files)
-       |  RD caches or downloads the torrent
-       v
-Zurg (polls RD every 10s, exposes via WebDAV)
+Zurg (polls RD every 10s, exposes via WebDAV on port 9999)
        |
        v
 rclone (FUSE mounts WebDAV to /mnt/zurg/)
        |
        v
-Plex (scans /mnt/zurg/shows/ and /mnt/zurg/movies/)
+Blackhole creates symlinks: /mnt/symlinks/*/completed/ -> /mnt/zurg/__all__/
        |
        v
-User watches on Plex client (TV, phone, etc.)
-```
-
-## Removal Flow
-
-```
-User removes from Plex Watchlist
+Sonarr/Radarr import to /mnt/plex/TV/ or /mnt/plex/Movies/
        |
        v
-watchlist-sync.sh (runs at noon + midnight CT)
-       |  Compares watchlist RSS vs RD inventory
-       |  24-hour grace period before deletion
-       v
-Real-Debrid API (deletes torrent)
-       |
-       v
-Zurg/rclone (files disappear from mount)
-       |
-       v
-Plex (next scan + empty trash removes from library)
+Plex (scans /mnt/plex/ and /mnt/zurg/ libraries -> user watches on TV)
 ```
 
 ## Monitoring Flow
 
 ```
-mount-watchdog.sh (every 5 min)
-  - Checks FUSE mount on host AND inside Plex container
-  - Auto-restarts rclone and/or Plex if mount drops
-  - Discord alert on failure
+cAdvisor (container CPU, memory, network, disk metrics)
+  Tuned: --housekeeping_interval=30s, --docker_only=true
+  Disabled: percpu, sched, tcp, udp metrics (reduces CPU on 2 vCPU server)
+  + Node Exporter (host OS metrics)
+       |
+       v
+Prometheus (scrapes every 60s, stores 30 days)
+       |
+       v
+Grafana (dashboards + 5 alert rules, 2m evaluation interval)
+       |  Alert rule pattern: A (Prometheus query) -> B (Reduce) -> C (Threshold)
+       |  Missing the Reduce step (B) causes all alerts to error
+       |  Alerts: container down, high CPU/memory/disk, mount failure
+       v
+Discord webhook
 
-healthcheck.sh (every 15 min)
-  - Checks all 5 containers running + healthy
-  - Checks watchlist-sync container specifically
-  - Checks disk (alert >85%) and memory (alert >90%)
-  - Discord alert on any issue
-
-daily-report.py (9am CT)
-  - Pipeline status: watchlist vs debrid vs plex counts
-  - Server health: containers, disk, memory, FUSE mount
-  - Debrid/Torrentio: proxy, RD premium, errors, duplicates, blocked items
-  - Plex: scan status, missing items with reason (not in RD vs pending scan)
+Tautulli (monitors Plex directly)
+       |  Alerts: new content added, server down, scan issues
+       |  Discord notifier agent_id = 20 (NOT 18/Join)
+       v
+Discord webhook
 ```
 
 ## Container Dependencies
 
 ```
 zurg (starts first, healthcheck: curl WebDAV)
-  └─> rclone (waits for zurg healthy, healthcheck: ls /data/movies)
+  └─> rclone (waits for zurg healthy, healthcheck: ls /data/__all__)
         ├─> plex (waits for rclone healthy, healthcheck: curl /identity)
-        └─> watchlist-sync (waits for rclone healthy, healthcheck: heartbeat file)
+        └─> blackhole (waits for rclone + sonarr + radarr healthy)
+
+prowlarr (independent, healthcheck: curl /ping)
+  ├─> sonarr (waits for prowlarr healthy)
+  └─> radarr (waits for prowlarr healthy)
+
+plex + sonarr + radarr
+  └─> seerr (waits for all three healthy)
+        └─> doplarr (waits for seerr healthy)
+
+plex
+  └─> tautulli (waits for plex healthy)
+
+cadvisor + node-exporter
+  └─> prometheus
+        └─> grafana
+
 autoheal (independent, monitors all containers)
 ```
 
@@ -84,22 +100,40 @@ autoheal (independent, monitors all containers)
 
 - Plex uses `network_mode: host` (required for DLNA/discovery)
 - All other containers use Docker default bridge network
-- Zurg listens on port 9999 (internal only)
-- Plex listens on port 32400 (exposed via host network)
-- UFW firewall allows: SSH, 32400 (Plex), 8080 (legacy), 9696 (legacy)
+- Containers communicate by service name (e.g., `http://sonarr:8989`)
+- UFW firewall allows: SSH (22), Plex (32400), Seerr (5055), Grafana (3000)
 
 ## Volumes
 
-- `plex-config` — Plex database and settings (persist across restarts)
-- `watchlist-data` — Watchlist manager state file (tracks what's been added)
-- `/mnt/zurg` — FUSE mount point (not a Docker volume, host path)
+| Volume | Purpose |
+|--------|---------|
+| `plex-config` | Plex database and settings |
+| `zurg-data` | Zurg state data |
+| `prowlarr-config` | Prowlarr indexer configuration |
+| `sonarr-config` | Sonarr library database and settings |
+| `radarr-config` | Radarr library database and settings |
+| `seerr-config` | Seerr request database |
+| `tautulli-config` | Tautulli monitoring data |
+| `prometheus-data` | Prometheus time-series metrics (30 day retention) |
+| `grafana-data` | Grafana dashboards, users, alert state |
+| `/mnt/zurg` | FUSE mount point (host path, not Docker volume) |
+| `/mnt/symlinks` | Blackhole working directories (host path) |
+| `/mnt/plex` | Organized library (host path, symlinks to mount) |
 
 ## Key Design Decisions
 
-1. **Custom watchlist-sync.py instead of Riven** — Riven created massive duplicates in RD by scraping at show/season/episode levels independently. Our script sends exactly one torrent per show to RD.
+1. **Blackhole script instead of Decypharr** -- More proven, simpler, explicitly checks RD cache before committing. Better for hands-off reliability.
 
-2. **Torrentio via HTTP proxy instead of Prowlarr** — Torrentio has the largest catalog. Prowlarr's public indexers were mostly Cloudflare-blocked from datacenter IPs. IPRoyal static residential proxy ($4/mo) solves this cleanly.
+2. **TPB + YTS in Prowlarr** -- Torrentio is CloudFlare-blocked from datacenter IPs. 1337x and EZTV are also blocked. The Pirate Bay and YTS work without proxy from DigitalOcean. Eliminates IPRoyal proxy dependency.
 
-3. **rslave mount propagation for Plex** — Using `rshared` caused mount disconnections inside the Plex container. `rslave` inherits mount changes from the host. Combined with mount-watchdog.sh checking inside the Plex container.
+3. **Prometheus + Grafana instead of custom scripts** -- Purpose-built monitoring with proper alerting thresholds, dashboards, and Discord integration. Replaces fragile shell scripts. Prometheus scrapes at 60s intervals; Grafana evaluates alerts every 2 minutes. cAdvisor tuned with 30s housekeeping and disabled unnecessary metrics to reduce CPU load on 2 vCPU server.
 
-4. **Plex libraries at /mnt/zurg/shows and /mnt/zurg/movies** — Originally used /media/shows and /media/movies, but these broke when the FUSE mount dropped. Mounting the parent `/mnt/zurg` with rslave is more resilient.
+4. **Tautulli for Plex monitoring** -- Knows Plex's API natively, provides rich media notifications (new content, server health).
+
+5. **Symlink-based library** -- Plex reads from `/mnt/plex/` (symlinks organized by Sonarr/Radarr) rather than directly from `/mnt/zurg/` (raw torrent names). This gives proper media naming and organization.
+
+6. **rslave mount propagation for Plex** -- Using `rshared` caused mount disconnections inside the Plex container. Combined with mount-watchdog.sh checking inside the Plex container every 5 minutes.
+
+7. **Seerr over Overseerr** -- Seerr (v3.1.0) is an actively maintained fork of Overseerr with continued development. Provides the same functionality with ongoing updates and bug fixes.
+
+8. **Plex analysis fully disabled** -- All analysis features disabled via environment variables (GenerateBIFBehavior, LoudnessAnalysisBehavior, GenerateIntroMarkerBehavior, GenerateCreditsMarkerBehavior all set to `never`). Prevents excessive RD API calls that can cause bans, and reduces CPU load on the 2 vCPU server.

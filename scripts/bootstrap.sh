@@ -43,8 +43,12 @@ fi
 
 # ── Create directory structure ──
 echo "[4/7] Creating project directories..."
-mkdir -p "$PROJECT_DIR"/{zurg,rclone,scripts,backups,logs}
+mkdir -p "$PROJECT_DIR"/{zurg,rclone,prometheus,grafana/provisioning/{datasources,dashboards,alerting},grafana/dashboards,scripts,backups,logs}
 mkdir -p "$MOUNT_POINT"
+# Blackhole working directories
+mkdir -p /mnt/symlinks/{radarr,sonarr}
+# Organized library directories (populated by blackhole symlinks, read by Plex)
+mkdir -p /mnt/plex/{Movies,TV}
 
 # ── Configure firewall ──
 echo "[5/7] Configuring firewall..."
@@ -53,9 +57,10 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp comment "SSH"
 ufw allow 32400/tcp comment "Plex"
-ufw allow 3001/tcp comment "Riven UI"
+ufw allow 5055/tcp comment "Overseerr"
+ufw allow 3000/tcp comment "Grafana"
 ufw --force enable
-echo "  Firewall configured (SSH, Plex, Riven UI)"
+echo "  Firewall configured (SSH, Plex, Overseerr, Grafana)"
 
 # ── Set timezone ──
 echo "[6/7] Setting timezone..."
@@ -66,17 +71,38 @@ echo "  Timezone: America/Chicago"
 echo "[7/7] Generating .env file..."
 ENV_FILE="$PROJECT_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  PG_PASS=$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)
+  GRAFANA_PASS=$(openssl rand -base64 24 | tr -d '/+=' | head -c 16)
   cat > "$ENV_FILE" <<EOF
+# ===========================================
 # Plex + Real-Debrid Server Configuration
-# Fill in your values below.
+# ===========================================
 
-REAL_DEBRID_API_TOKEN=
-PLEX_CLAIM=
-DISCORD_WEBHOOK_URL=
-PLEX_TOKEN=
-POSTGRES_PASSWORD=${PG_PASS}
+# --- Timezone ---
 TIMEZONE=America/Chicago
+
+# --- Real-Debrid ---
+REAL_DEBRID_API_TOKEN=
+
+# --- Plex ---
+PLEX_CLAIM=
+PLEX_TOKEN=
+
+# --- Sonarr / Radarr (fill after first launch) ---
+SONARR_API_KEY=
+RADARR_API_KEY=
+
+# --- Overseerr (fill after first launch) ---
+OVERSEERR_API_KEY=
+
+# --- Doplarr (Discord Bot) ---
+DOPLARR_DISCORD_TOKEN=
+
+# --- Discord Alerts ---
+DISCORD_WEBHOOK_URL=
+
+# --- Grafana ---
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=${GRAFANA_PASS}
 EOF
   chmod 600 "$ENV_FILE"
   echo "  Created $ENV_FILE (fill in your tokens)"

@@ -1,6 +1,6 @@
 zurg: v1
 
-# Replace with your Real-Debrid API token
+# Token is set directly on the server (not from env vars — Zurg doesn't support interpolation)
 token: YOUR_RD_TOKEN_HERE
 host: "0.0.0.0"
 port: 9999
@@ -8,6 +8,10 @@ port: 9999
 check_for_changes_every_secs: 10
 enable_repair: true
 auto_delete_rar_torrents: true
+
+# Required for blackhole script compatibility
+retain_rd_torrent_name: true
+retain_folder_name_extension: true
 
 directories:
   shows:

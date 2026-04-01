@@ -1,5 +1,6 @@
 #!/bin/bash
 # Mount Watchdog - checks FUSE mount on host AND inside Plex container
+# Runs via cron every 5 minutes: */5 * * * *
 LOGFILE="/opt/plex-server/logs/mount-watchdog.log"
 WEBHOOK_URL=$(grep DISCORD_WEBHOOK_URL /opt/plex-server/.env | cut -d= -f2-)
 
@@ -13,13 +14,13 @@ send_discord() {
 HOST_OK=false
 PLEX_OK=false
 
-# Check host mount
-if ls /mnt/zurg/shows > /dev/null 2>&1; then
+# Check host mount (verify __all__ since blackhole depends on it)
+if ls /mnt/zurg/__all__ > /dev/null 2>&1; then
     HOST_OK=true
 fi
 
 # Check Plex container mount
-if docker exec plex ls /mnt/zurg/shows > /dev/null 2>&1; then
+if docker exec plex ls /mnt/zurg/__all__ > /dev/null 2>&1; then
     PLEX_OK=true
 fi
 
@@ -39,7 +40,7 @@ if ! $HOST_OK; then
     sleep 20
     docker compose restart plex
     sleep 15
-    if ls /mnt/zurg/shows > /dev/null 2>&1 && docker exec plex ls /mnt/zurg/shows > /dev/null 2>&1; then
+    if ls /mnt/zurg/__all__ > /dev/null 2>&1 && docker exec plex ls /mnt/zurg/__all__ > /dev/null 2>&1; then
         log "RECOVERED - mount restored (host + plex)"
         send_discord "✅ **Mount Watchdog**: Mount restored."
     else
@@ -60,7 +61,7 @@ if $HOST_OK && ! $PLEX_OK; then
     cd /opt/plex-server
     docker compose restart plex
     sleep 15
-    if docker exec plex ls /mnt/zurg/shows > /dev/null 2>&1; then
+    if docker exec plex ls /mnt/zurg/__all__ > /dev/null 2>&1; then
         log "RECOVERED - plex mount restored"
     else
         log "FAILED - plex mount still broken after restart"

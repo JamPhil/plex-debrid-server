@@ -1,4 +1,19 @@
+# =============================================================================
+# Plex + Real-Debrid Streaming Server — *Arr Stack + Monitoring
+# =============================================================================
+# Architecture:
+#   Request → Overseerr/Doplarr → Sonarr/Radarr → Prowlarr → Blackhole → RD
+#   RD → Zurg → rclone (/mnt/zurg) → Plex (/mnt/plex via symlinks)
+#   Monitoring: cAdvisor + Node Exporter → Prometheus → Grafana → Discord
+#   Plex Monitoring: Tautulli → Discord
+# =============================================================================
+
 services:
+
+  # ---------------------------------------------------------------------------
+  # STORAGE LAYER — Real-Debrid → filesystem
+  # ---------------------------------------------------------------------------
+
   zurg:
     image: ghcr.io/debridmediamanager/zurg-testing:latest
     container_name: zurg
@@ -7,6 +22,7 @@ services:
       - "9999:9999"
     volumes:
       - ./zurg/config.yml:/app/config.yml:ro
+      - zurg-data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9999/dav/"]
       interval: 30s
@@ -27,10 +43,13 @@ services:
     volumes:
       - ./rclone/rclone.conf:/config/rclone/rclone.conf:ro
       - /mnt/zurg:/data:rshared
+      - /mnt:/mnt
     command: >
       mount zurg: /data
       --allow-other
       --allow-non-empty
+      --uid=1000
+      --gid=1000
       --dir-cache-time 10s
       --vfs-cache-mode minimal
       --vfs-read-chunk-size 8M
@@ -42,11 +61,15 @@ services:
       zurg:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "ls", "/data/movies"]
+      test: ["CMD", "ls", "/data/__all__"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # MEDIA SERVER — Plex
+  # ---------------------------------------------------------------------------
 
   plex:
     image: lscr.io/linuxserver/plex:latest
@@ -56,13 +79,12 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TZ=${TIMEZONE:-America/Chicago}
+      - TZ=${TIMEZONE}
       - VERSION=docker
       - PLEX_CLAIM=${PLEX_CLAIM}
     volumes:
       - plex-config:/config
-      - /mnt/zurg:/mnt/zurg:rslave
-      
+      - /mnt:/mnt
     depends_on:
       rclone:
         condition: service_healthy
@@ -73,31 +95,275 @@ services:
       retries: 3
       start_period: 30s
 
-  watchlist-sync:
-    image: python:3.12-slim
-    container_name: watchlist-sync
+  # ---------------------------------------------------------------------------
+  # MEDIA MANAGEMENT — *Arr Stack
+  # ---------------------------------------------------------------------------
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
     restart: unless-stopped
     environment:
-      - RD_API_TOKEN=${REAL_DEBRID_API_TOKEN}
-      - PLEX_TOKEN=${PLEX_TOKEN}
-      - PLEX_URL=http://YOUR_SERVER_IP:32400
-      - WATCHLIST_RSS=${WATCHLIST_RSS}
-      - DISCORD_WEBHOOK=${DISCORD_WEBHOOK_URL}
-      - TORRENTIO_PROXY=http://USER:PASS@PROXY_IP:PORT  # IPRoyal credentials
-      - TZ=${TIMEZONE:-America/Chicago}
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE}
     volumes:
-      - ./scripts/watchlist-sync.py:/app/watchlist-sync.py:ro
-      - watchlist-data:/app/data
-    command: sh -c "pip install -q pysocks && python3 -u /app/watchlist-sync.py"
+      - prowlarr-config:/config
+    ports:
+      - "9696:9696"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE}
+    volumes:
+      - sonarr-config:/config
+      - /mnt:/mnt
+    ports:
+      - "8989:8989"
+    depends_on:
+      prowlarr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE}
+    volumes:
+      - radarr-config:/config
+      - /mnt:/mnt
+    ports:
+      - "7878:7878"
+    depends_on:
+      prowlarr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # RD BRIDGE — Blackhole (cache check + symlink creation)
+  # ---------------------------------------------------------------------------
+
+  blackhole:
+    image: ghcr.io/westsurname/scripts/blackhole:latest
+    container_name: blackhole
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE}
+      - PYTHONUNBUFFERED=1
+      # Real-Debrid
+      - REALDEBRID_ENABLED=true
+      - REALDEBRID_HOST=https://api.real-debrid.com/rest/1.0/
+      - REALDEBRID_API_KEY=${REAL_DEBRID_API_TOKEN}
+      - REALDEBRID_MOUNT_TORRENTS_PATH=/mnt/zurg/__all__
+      # Blackhole behavior
+      - BLACKHOLE_BASE_WATCH_PATH=/mnt/symlinks
+      - BLACKHOLE_RADARR_PATH=radarr
+      - BLACKHOLE_SONARR_PATH=sonarr
+      - BLACKHOLE_FAIL_IF_NOT_CACHED=false
+      - BLACKHOLE_RD_MOUNT_REFRESH_SECONDS=200
+      - BLACKHOLE_WAIT_FOR_TORRENT_TIMEOUT=60
+      - BLACKHOLE_HISTORY_PAGE_SIZE=500
+      # Sonarr connection
+      - SONARR_HOST=http://sonarr:8989
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - SONARR_ROOT_FOLDER=/mnt/plex/TV
+      # Radarr connection
+      - RADARR_HOST=http://radarr:7878
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - RADARR_ROOT_FOLDER=/mnt/plex/Movies
+      # Plex (for library refresh after import)
+      - PLEX_HOST=http://172.17.0.1:32400
+      - PLEX_SERVER_HOST=http://172.17.0.1:32400
+      - PLEX_SERVER_API_KEY=${PLEX_TOKEN}
+      - PLEX_SERVER_MOVIE_LIBRARY_ID=3
+      - PLEX_SERVER_TV_SHOW_LIBRARY_ID=4
+      - PLEX_SERVER_MACHINE_ID=8fb57fa19d81f0af24bb41b1fc6304649e6aad56
+    volumes:
+      - /mnt:/mnt
     depends_on:
       rclone:
         condition: service_healthy
+      sonarr:
+        condition: service_healthy
+      radarr:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # REQUEST LAYER — Seerr + Doplarr
+  # ---------------------------------------------------------------------------
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    restart: unless-stopped
+    init: true
+    environment:
+      - TZ=${TIMEZONE}
+      - LOG_LEVEL=debug
+    volumes:
+      - seerr-config:/app/config
+    ports:
+      - "5055:5055"
+    depends_on:
+      plex:
+        condition: service_healthy
+      sonarr:
+        condition: service_healthy
+      radarr:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c 'import os,time; s=os.stat(\"/app/data/heartbeat\"); exit(0 if time.time()-s.st_mtime < 300 else 1)'"]
-      interval: 60s
-      timeout: 5s
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5055/api/v1/status"]
+      interval: 30s
+      timeout: 10s
       retries: 3
       start_period: 30s
+
+  doplarr:
+    image: ghcr.io/kiranshila/doplarr:latest
+    container_name: doplarr
+    restart: unless-stopped
+    environment:
+      - TZ=${TIMEZONE}
+      - OVERSEERR__URL=http://seerr:5055
+      - OVERSEERR__API=${OVERSEERR_API_KEY}
+      - DISCORD__TOKEN=${DOPLARR_DISCORD_TOKEN}
+      - OVERSEERR__DEFAULT_ID=1
+      - PARTIAL_SEASONS=true
+    depends_on:
+      seerr:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # PLEX MONITORING — Tautulli
+  # ---------------------------------------------------------------------------
+
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    container_name: tautulli
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE}
+    volumes:
+      - tautulli-config:/config
+    ports:
+      - "8181:8181"
+    depends_on:
+      plex:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # METRICS COLLECTION
+  # ---------------------------------------------------------------------------
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    command:
+      - "--housekeeping_interval=30s"
+      - "--docker_only=true"
+      - "--disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,resctrl,process"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - "--path.rootfs=/host"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      - "--collector.textfile.directory=/var/lib/node-exporter"
+    volumes:
+      - /:/host:ro,rslave
+      - /var/lib/node-exporter:/var/lib/node-exporter:ro
+    ports:
+      - "9100:9100"
+
+  # ---------------------------------------------------------------------------
+  # METRICS STORAGE & VISUALIZATION
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - cadvisor
+      - node-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # ---------------------------------------------------------------------------
+  # CONTAINER MANAGEMENT
+  # ---------------------------------------------------------------------------
 
   autoheal:
     image: willfarrell/autoheal:latest
@@ -112,4 +378,11 @@ services:
 
 volumes:
   plex-config:
-  watchlist-data:
+  zurg-data:
+  prowlarr-config:
+  sonarr-config:
+  radarr-config:
+  seerr-config:
+  tautulli-config:
+  prometheus-data:
+  grafana-data:
