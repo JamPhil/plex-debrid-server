@@ -105,3 +105,22 @@ Chronological record of changes, decisions, and their rationale. Each entry shou
 **Why:** Pattern of jumping to first solution, treating symptoms, and stating unverified claims as fact. These rules are in CLAUDE.md so they're loaded as system instructions in every chat — not optional memory that might be forgotten mid-task.
 
 **Outcome:** Framework for better decision-making across all future sessions.
+
+---
+
+## 2026-04-01 — Sonarr TRaSH Guides Audit & Optimization
+
+**What:** Full audit of Sonarr configuration against TRaSH Guides best practices. Applied 6 fixes:
+
+1. **CRITICAL: skipFreeSpaceCheckWhenImporting = true** — Sonarr was rejecting season packs because it thought they'd exceed disk space. Content streams from RD, doesn't use local disk.
+2. **Series folder format** — Changed from `{Series TitleYear}` to `{Series TitleYear} {imdb-{ImdbId}}` for better Plex metadata matching.
+3. **Episode naming format** — Switched from `[brackets]` to TRaSH's `{[braces]}` pattern (empty values disappear instead of leaving `[]`). Added `:90` truncation to Episode CleanTitle to avoid path length issues.
+4. **4 new unwanted CFs** — Added Bad Dual Groups (id=38), No-RlsGroup (id=35), Obfuscated (id=37), Retags (id=36), all scored -10000 in WEB-2160p profile.
+5. **Indexer priorities** — TorrentLeech: 10 (was 25), LimeTorrents: 50 (was 10). Private tracker now preferred.
+6. **CF scoring verified** — WEB-2160p profile has 38 CFs total, all scored per TRaSH recommendations.
+
+**What was already correct:** Propers & Repacks = doNotPrefer, quality definitions (min sizes per TRaSH), WEB-2160p profile structure (cutoff, upgrade settings, all tier/service/HDR scores), download client config (Decypharr/qBit, category=sonarr).
+
+**Why:** Phase 3 TV pipeline was failing — Sonarr rejected season packs for disk space. Audit found this root cause plus 5 other improvements.
+
+**Outcome:** Sonarr now fully aligned with TRaSH Guides WEB-2160p profile. Ready for TV show test (add Severance, trigger SeriesSearch).
