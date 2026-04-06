@@ -119,7 +119,7 @@ docker compose up -d blackhole doplarr
 crontab -e
 # Add:
 */5 * * * * /opt/plex-server/scripts/mount-watchdog.sh
-*/2 * * * * /opt/plex-server/scripts/symlink-import.sh
+17 */6 * * * curl -s -X POST "http://localhost:8989/api/v3/command" -H "X-Api-Key: $SONARR_API_KEY" -H "Content-Type: application/json" -d '{"name": "MissingEpisodeSearch"}' > /dev/null 2>&1
 ```
 
 ## Step 6: Verify

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mount Watchdog - checks FUSE mount on host AND inside Plex container
+# Mount Watchdog - checks Decypharr mount on host AND inside Plex container
 # Runs via cron every 5 minutes: */5 * * * *
 LOGFILE="/opt/plex-server/logs/mount-watchdog.log"
 WEBHOOK_URL=$(grep DISCORD_WEBHOOK_URL /opt/plex-server/.env | cut -d= -f2-)
@@ -14,7 +14,7 @@ send_discord() {
 HOST_OK=false
 PLEX_OK=false
 
-# Check host mount (verify __all__ since blackhole depends on it)
+# Check host mount (verify __all__ is accessible)
 if ls /mnt/zurg/__all__ > /dev/null 2>&1; then
     HOST_OK=true
 fi
@@ -30,13 +30,13 @@ if $HOST_OK && $PLEX_OK; then
     exit 0
 fi
 
-# Host mount broken - restart rclone
+# Host mount broken - restart decypharr
 if ! $HOST_OK; then
-    log "ALERT - host mount broken, restarting rclone"
-    send_discord "⚠️ **Mount Watchdog**: Host mount broken. Restarting rclone + plex..."
+    log "ALERT - host mount broken, restarting decypharr"
+    send_discord "⚠️ **Mount Watchdog**: Host mount broken. Restarting decypharr + plex..."
     cd /opt/plex-server
     fusermount3 -uz /mnt/zurg 2>/dev/null
-    docker compose restart rclone
+    docker compose restart decypharr
     sleep 20
     docker compose restart plex
     sleep 15
@@ -45,12 +45,7 @@ if ! $HOST_OK; then
         send_discord "✅ **Mount Watchdog**: Mount restored."
     else
         log "FAILED - mount still broken"
-        send_discord "🔴 **Mount Watchdog**: Mount still broken! Trying full restart..."
-        docker compose restart zurg
-        sleep 15
-        docker compose restart rclone
-        sleep 20
-        docker compose restart plex
+        send_discord "🔴 **Mount Watchdog**: Mount still broken after decypharr restart!"
     fi
     exit 0
 fi

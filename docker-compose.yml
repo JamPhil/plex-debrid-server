@@ -2,8 +2,8 @@
 # Plex + Real-Debrid Streaming Server — *Arr Stack + Monitoring
 # =============================================================================
 # Architecture:
-#   Request → Overseerr/Doplarr → Sonarr/Radarr → Prowlarr → Blackhole → RD
-#   RD → Zurg → rclone (/mnt/zurg) → Plex (/mnt/plex via symlinks)
+#   Request → Seerr/Doplarr → Sonarr/Radarr → Prowlarr → Decypharr → RD
+#   RD → Decypharr (WebDAV + rclone) → /mnt/decypharr → Plex (/mnt/plex via symlinks)
 #   Monitoring: cAdvisor + Node Exporter → Prometheus → Grafana → Discord
 #   Plex Monitoring: Tautulli → Discord
 # =============================================================================
@@ -11,61 +11,98 @@
 services:
 
   # ---------------------------------------------------------------------------
-  # STORAGE LAYER — Real-Debrid → filesystem
+  # STORAGE + RD BRIDGE — Decypharr (replaces Zurg + rclone + blackhole)
+  # ---------------------------------------------------------------------------
+  # Decypharr emulates qBittorrent API for Sonarr/Radarr integration.
+  # Built-in: RD cache check, WebDAV server, rclone mount, symlink creation.
+  # download_uncached=false rejects non-cached torrents instantly.
   # ---------------------------------------------------------------------------
 
-  zurg:
-    image: ghcr.io/debridmediamanager/zurg-testing:latest
-    container_name: zurg
+  decypharr:
+    image: cy01/blackhole:latest
+    container_name: decypharr
     restart: unless-stopped
     ports:
-      - "9999:9999"
+      - "8282:8282"
     volumes:
-      - ./zurg/config.yml:/app/config.yml:ro
-      - zurg-data:/app/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9999/dav/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  rclone:
-    image: rclone/rclone:latest
-    container_name: rclone
-    restart: unless-stopped
+      - decypharr-config:/app
+      - /mnt:/mnt:rshared
+    devices:
+      - /dev/fuse
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
-    devices:
-      - /dev/fuse
-    volumes:
-      - ./rclone/rclone.conf:/config/rclone/rclone.conf:ro
-      - /mnt/zurg:/data:rshared
-      - /mnt:/mnt
-    command: >
-      mount zurg: /data
-      --allow-other
-      --allow-non-empty
-      --uid=1000
-      --gid=1000
-      --dir-cache-time 10s
-      --vfs-cache-mode minimal
-      --vfs-read-chunk-size 8M
-      --vfs-read-chunk-size-limit 64M
-      --buffer-size 8M
-      --poll-interval 30s
-      --log-level INFO
-    depends_on:
-      zurg:
-        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=002
+      - RCLONE_DIR_CACHE_TIME=10s
+      - RCLONE_VFS_CACHE_POLL_INTERVAL=10s
     healthcheck:
-      test: ["CMD", "ls", "/data/__all__"]
+      test: ["CMD", "ls", "/mnt/decypharr/realdebrid/__all__"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # DEPRECATED — Zurg + rclone + blackhole (replaced by Decypharr 2026-04-01)
+  # Kept commented out for rollback. See docs/REBUILD-PLAN.md for context.
+  # ---------------------------------------------------------------------------
+  #
+  # zurg:
+  #   image: ghcr.io/debridmediamanager/zurg-testing:latest
+  #   container_name: zurg
+  #   restart: unless-stopped
+  #   ports:
+  #     - "9999:9999"
+  #   volumes:
+  #     - ./zurg/config.yml:/app/config.yml:ro
+  #     - zurg-data:/app/data
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9999/dav/"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 10s
+  #
+  # rclone:
+  #   image: rclone/rclone:latest
+  #   container_name: rclone
+  #   restart: unless-stopped
+  #   cap_add:
+  #     - SYS_ADMIN
+  #   security_opt:
+  #     - apparmor:unconfined
+  #   devices:
+  #     - /dev/fuse
+  #   volumes:
+  #     - ./rclone/rclone.conf:/config/rclone/rclone.conf:ro
+  #     - /mnt/zurg:/data:rshared
+  #     - /mnt:/mnt
+  #   command: >
+  #     mount zurg: /data
+  #     --allow-other
+  #     --allow-non-empty
+  #     --uid=1000
+  #     --gid=1000
+  #     --dir-cache-time 10s
+  #     --vfs-cache-mode minimal
+  #     --vfs-read-chunk-size 8M
+  #     --vfs-read-chunk-size-limit 64M
+  #     --buffer-size 8M
+  #     --poll-interval 30s
+  #     --log-level INFO
+  #   depends_on:
+  #     zurg:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "ls", "/data/__all__"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 15s
 
   # ---------------------------------------------------------------------------
   # MEDIA SERVER — Plex
@@ -86,7 +123,7 @@ services:
       - plex-config:/config
       - /mnt:/mnt
     depends_on:
-      rclone:
+      decypharr:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:32400/identity"]
@@ -165,55 +202,50 @@ services:
       start_period: 30s
 
   # ---------------------------------------------------------------------------
-  # RD BRIDGE — Blackhole (cache check + symlink creation)
+  # DEPRECATED — Blackhole (replaced by Decypharr 2026-04-01)
   # ---------------------------------------------------------------------------
-
-  blackhole:
-    image: ghcr.io/westsurname/scripts/blackhole:latest
-    container_name: blackhole
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=${TIMEZONE}
-      - PYTHONUNBUFFERED=1
-      # Real-Debrid
-      - REALDEBRID_ENABLED=true
-      - REALDEBRID_HOST=https://api.real-debrid.com/rest/1.0/
-      - REALDEBRID_API_KEY=${REAL_DEBRID_API_TOKEN}
-      - REALDEBRID_MOUNT_TORRENTS_PATH=/mnt/zurg/__all__
-      # Blackhole behavior
-      - BLACKHOLE_BASE_WATCH_PATH=/mnt/symlinks
-      - BLACKHOLE_RADARR_PATH=radarr
-      - BLACKHOLE_SONARR_PATH=sonarr
-      - BLACKHOLE_FAIL_IF_NOT_CACHED=false
-      - BLACKHOLE_RD_MOUNT_REFRESH_SECONDS=200
-      - BLACKHOLE_WAIT_FOR_TORRENT_TIMEOUT=60
-      - BLACKHOLE_HISTORY_PAGE_SIZE=500
-      # Sonarr connection
-      - SONARR_HOST=http://sonarr:8989
-      - SONARR_API_KEY=${SONARR_API_KEY}
-      - SONARR_ROOT_FOLDER=/mnt/plex/TV
-      # Radarr connection
-      - RADARR_HOST=http://radarr:7878
-      - RADARR_API_KEY=${RADARR_API_KEY}
-      - RADARR_ROOT_FOLDER=/mnt/plex/Movies
-      # Plex (for library refresh after import)
-      - PLEX_HOST=http://172.17.0.1:32400
-      - PLEX_SERVER_HOST=http://172.17.0.1:32400
-      - PLEX_SERVER_API_KEY=${PLEX_TOKEN}
-      - PLEX_SERVER_MOVIE_LIBRARY_ID=3
-      - PLEX_SERVER_TV_SHOW_LIBRARY_ID=4
-      - PLEX_SERVER_MACHINE_ID=8fb57fa19d81f0af24bb41b1fc6304649e6aad56
-    volumes:
-      - /mnt:/mnt
-    depends_on:
-      rclone:
-        condition: service_healthy
-      sonarr:
-        condition: service_healthy
-      radarr:
-        condition: service_healthy
+  #
+  # blackhole:
+  #   image: ghcr.io/westsurname/scripts/blackhole:latest
+  #   container_name: blackhole
+  #   restart: unless-stopped
+  #   environment:
+  #     - PUID=1000
+  #     - PGID=1000
+  #     - TZ=${TIMEZONE}
+  #     - PYTHONUNBUFFERED=1
+  #     - REALDEBRID_ENABLED=true
+  #     - REALDEBRID_HOST=https://api.real-debrid.com/rest/1.0/
+  #     - REALDEBRID_API_KEY=${REAL_DEBRID_API_TOKEN}
+  #     - REALDEBRID_MOUNT_TORRENTS_PATH=/mnt/zurg/__all__
+  #     - BLACKHOLE_BASE_WATCH_PATH=/mnt/symlinks
+  #     - BLACKHOLE_RADARR_PATH=radarr
+  #     - BLACKHOLE_SONARR_PATH=sonarr
+  #     - BLACKHOLE_FAIL_IF_NOT_CACHED=false
+  #     - BLACKHOLE_RD_MOUNT_REFRESH_SECONDS=200
+  #     - BLACKHOLE_WAIT_FOR_TORRENT_TIMEOUT=60
+  #     - BLACKHOLE_HISTORY_PAGE_SIZE=500
+  #     - SONARR_HOST=http://sonarr:8989
+  #     - SONARR_API_KEY=${SONARR_API_KEY}
+  #     - SONARR_ROOT_FOLDER=/mnt/plex/TV
+  #     - RADARR_HOST=http://radarr:7878
+  #     - RADARR_API_KEY=${RADARR_API_KEY}
+  #     - RADARR_ROOT_FOLDER=/mnt/plex/Movies
+  #     - PLEX_HOST=http://172.17.0.1:32400
+  #     - PLEX_SERVER_HOST=http://172.17.0.1:32400
+  #     - PLEX_SERVER_API_KEY=${PLEX_TOKEN}
+  #     - PLEX_SERVER_MOVIE_LIBRARY_ID=3
+  #     - PLEX_SERVER_TV_SHOW_LIBRARY_ID=4
+  #     - PLEX_SERVER_MACHINE_ID=8fb57fa19d81f0af24bb41b1fc6304649e6aad56
+  #   volumes:
+  #     - /mnt:/mnt
+  #   depends_on:
+  #     rclone:
+  #       condition: service_healthy
+  #     sonarr:
+  #       condition: service_healthy
+  #     radarr:
+  #       condition: service_healthy
 
   # ---------------------------------------------------------------------------
   # REQUEST LAYER — Seerr + Doplarr
@@ -378,7 +410,8 @@ services:
 
 volumes:
   plex-config:
-  zurg-data:
+  decypharr-config:
+  # zurg-data:  # deprecated
   prowlarr-config:
   sonarr-config:
   radarr-config:
