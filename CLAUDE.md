@@ -132,7 +132,7 @@ When starting a new session with no specific task, check `BACKLOG.md` for open i
    - Save to memory (if it's context future chats need)
    - Append to `docs/DEVLOG.md` (chronological record of what changed, why, and the outcome)
    - Do not wait until end of chat — save after each significant action
-6. **Commit and push meaningful changes.** After completing a body of work (fixes, config updates, new docs), commit to git and push to GitHub so all agents work from the same state.
+6. **Commit locally, push at milestones.** Commit meaningful changes to git as you work. Push to GitHub at end of session or after major milestones — not after every small edit. GitHub is an offsite backup; the local folder is the working copy.
 
 ## Common Issues
 1. **ffprobe rate limit floods** -- DUMB's built-in ffprobe monitoring should detect and unstick frozen scans. If RD rate limits hit, stop adding content and wait for current imports to complete. Add in batches of 3-5.
